@@ -12,6 +12,39 @@ import org.basex.gui.layout.*;
 import org.basex.gui.layout.BaseXFileChooser.*;
 import org.basex.io.*;
 
+class ArrayFocusTraversalPolicy extends FocusTraversalPolicy {
+  ArrayList<Component> order;
+  public ArrayFocusTraversalPolicy(final ArrayList<Component> order) {
+    this.order = order;
+  }
+  @Override
+  public Component getComponentAfter(final Container focusCycleRoot, final Component aComponent) {
+    if(order == null) return null;
+    final int idx = order.indexOf(aComponent);
+    if(idx == -1) return null;
+    return order.get((idx + 1) % order.size());
+  }
+  @Override
+  public Component getComponentBefore(final Container focusCycleRoot, final Component aComponent) {
+    if(order == null) return null;
+    final int idx = order.indexOf(aComponent);
+    if(idx == -1) return null;
+    return order.get((idx - 1 + order.size()) % order.size());
+  }
+  @Override
+  public Component getDefaultComponent(final Container focusCycleRoot) {
+    return order.get(0);
+  }
+  @Override
+  public Component getLastComponent(final Container focusCycleRoot) {
+    return order.get(order.size() - 1);
+  }
+  @Override
+  public Component getFirstComponent(final Container focusCycleRoot) {
+    return order.get(0);
+  }
+}
+
 /**
  * Dialog window for defining variable and context bindings.
 
@@ -38,29 +71,35 @@ public final class DialogBindings extends BaseXDialog {
 
     final BaseXBack west = new BaseXBack(new GridLayout(MAX + 2, 1, 0, 4));
     west.add(new BaseXLabel(NAME + COLS, false, true));
+    final BaseXBack center = new BaseXBack(new GridLayout(MAX + 2, 1, 0, 4));
+    center.add(new BaseXLabel(VALUE + COLS, false, true));
+    ArrayList<Component> order = new ArrayList<>(); // order of traversal
     for(int c = 0; c < MAX; c++) {
       names[c] = new BaseXTextField(this);
       BaseXLayout.setWidth(names[c], 100);
       west.add(names[c]);
+      values[c] = new BaseXTextField(this);
+      BaseXLayout.setWidth(values[c], 250);
+      center.add(values[c]);
+      order.add(names[c]);
+      order.add(values[c]);
     }
     west.add(new BaseXLabel("Context item" + COLS));
     set(west, BorderLayout.WEST);
 
-    final BaseXBack center = new BaseXBack(new GridLayout(MAX + 2, 1, 0, 4));
-    center.add(new BaseXLabel(VALUE + COLS, false, true));
-    for(int c = 0; c < MAX; c++) {
-      values[c] = new BaseXTextField(this);
-      BaseXLayout.setWidth(values[c], 250);
-      center.add(values[c]);
-    }
-
     final BaseXBack ctx = new BaseXBack().layout(new BorderLayout(8, 0));
     ctxitem = new BaseXTextField(this).hint(gui.editor.context());
     ctx.add(ctxitem, BorderLayout.CENTER);
+    order.add(ctxitem);
     final BaseXButton browse = new BaseXButton(this, BROWSE_D);
     browse.addActionListener(e -> choose());
     ctx.add(browse, BorderLayout.EAST);
     center.add(ctx);
+    order.add(browse);
+
+    ArrayFocusTraversalPolicy policy = new ArrayFocusTraversalPolicy(order);
+    panel.setFocusTraversalPolicy(policy);
+    panel.setFocusCycleRoot(true);
 
     set(center, BorderLayout.CENTER);
 
