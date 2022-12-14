@@ -4,6 +4,8 @@
  * Copyright (c) 2005-22, Alexander Holupirek <alex@holupirek.de>, BSD license
  */
 
+#include "sys/types.h"
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -28,6 +30,15 @@ int basex_execute(int sfd, const char *command, char **result, char **info);
 
 /* Close session with descriptor sfd. */
 void basex_close(int sfd);
+
+int	basex_query(int const, char const * const, char ** const, char * const, char ** const);
+int	basex_query_results(int const, char const * const);
+int	basex_query_more(int const, char * const, char ** const, size_t * const, char * const, char ** const);
+int	basex_query_execute(int const, char const * const, char **const, char * const, char **const);
+int	basex_query_close(int const, char const * const, char * const, char ** const);
+int	basex_query_bind(int const, char const * const, char const * const, char const * const, char const * const, char * const, char ** const);
+int	basex_query_context(int const, char const * const, char const * const, char const * const, char * const, char ** const);
+
 #ifdef __cplusplus
 }
 #endif

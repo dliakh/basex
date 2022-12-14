@@ -20,6 +20,7 @@
 #include <sys/socket.h>
 #include <sys/types.h>
 #include <unistd.h>
+#include <sys/uio.h>
 
 #include "basexdbc.h"
 #include "md5.h"
@@ -397,4 +398,382 @@ send_db(int sfd, const char *buf, size_t buf_len)
 		buf += ret;
 	}
 	return 0;
+}
+
+#ifndef BASEX_BLK_READ_SIZE
+#define BASEX_BLK_READ_SIZE 100
+#endif
+
+#ifndef BASEX_BLK_READ_SIZE_INCR
+#define BASEX_BLK_READ_SIZE_INCR 10
+#endif
+
+#ifndef BASEX_BLK_READ_SIZE_MUL
+#define BASEX_BLK_READ_SIZE_MUL 2
+#endif
+
+static ssize_t
+basex_read_server_response(int const sfd, char * const code, char ** const message)
+{
+	char c;
+	ssize_t rc = read(sfd, &c, sizeof c);
+	if (-1 == rc) {
+		perror("read");
+		return -1;
+	}
+	if (0 == c)
+	    return 0;
+	size_t size = BASEX_BLK_READ_SIZE;
+	size_t incr = BASEX_BLK_READ_SIZE_INCR;
+	char *msg = malloc(size);
+	if (NULL == msg)
+		goto error;
+	char *p = msg;
+	while (1) {
+		if (p - msg > size) {
+			size += incr;
+			char * const newmsg = realloc(msg, size);
+			if (NULL == newmsg)
+				goto error;
+			off_t const offs = p - msg;
+			msg = newmsg;
+			p = msg + offs;
+			incr *= BASEX_BLK_READ_SIZE_MUL;
+		}
+		rc = read(sfd, p, sizeof *p);
+		if (-1 == rc) {
+			perror("read");
+			goto error;
+		}
+		if (0 == rc) {
+			warnx("EOF");
+			goto error;
+		}
+		if ('\0' == *p)
+			break;
+		++p;
+	}
+
+	*code = c;
+	*message = msg;
+	return p - msg;
+	
+	error:
+	if (NULL != msg)
+		free(msg);
+	return -1;
+}
+
+static ssize_t
+basex_read_block(int const sfd, char ** const block)
+{
+	size_t size = BASEX_BLK_READ_SIZE;
+	size_t incr = BASEX_BLK_READ_SIZE_INCR;
+	char *buf = malloc(size);
+	if (NULL == buf)
+		return -1;
+	int esc = 0;
+	char *p = buf;
+	while (1) {
+		if (p - buf > size) {
+			size += incr;
+			char * const newbuf = realloc(buf, size);
+			if (NULL == newbuf)
+				goto error;
+			off_t const offs = p - buf;
+			buf = newbuf;
+			p = newbuf + offs;
+			incr *= BASEX_BLK_READ_SIZE_MUL;
+ 		}
+		ssize_t const rc = read(sfd, p, sizeof *p);
+		if (-1 == rc) {
+			perror("read");
+			goto error;
+		}
+		if (0 == rc) {
+			warnx("EOF");
+			goto error;
+		}
+		if (!esc && '\xff' == *p) {
+			esc = 1;
+			continue;
+		}
+		if (esc) {
+			++p;
+			esc = 0;
+			continue;
+		}
+		if ('\0' == *p)
+			break;
+		++p;
+	}
+
+	*block = buf;
+	return p - buf;
+
+	error:
+		if (NULL != buf)
+			free(buf);
+		return -1;
+}
+
+int
+basex_query(int const sfd, char const * const query, char ** const qid, char * const code, char ** const server_message)
+{
+	char const command = '\x00';
+	struct iovec const message[] = {
+		{
+			.iov_base = (void *)&command,
+			.iov_len = sizeof command
+		},
+		{
+			.iov_base = (void *)query,
+			.iov_len = strlen(query) + 1
+		}
+	};
+	ssize_t rc = writev(sfd, message, sizeof message / sizeof *message);
+	if (-1 == rc) {
+		perror("writev");
+		return -1;
+	}
+	size_t len = 0;
+	for (unsigned i = 0; i < sizeof message / sizeof *message; ++i)
+		len += message[i].iov_len;
+	if (rc != len) {
+		warnx("writev: expected %lu, wrote %ld", len, rc);
+		return -1;
+	}
+	char *id = NULL;
+	rc = basex_read_block(sfd, &id);
+	if (-1 == rc)
+		return -1;
+	rc = basex_read_server_response(sfd, code, server_message);
+	if (-1 == rc)
+		goto error;
+	*qid = id;
+	return 0;
+	error:
+		if (NULL != id)
+			free(id);
+		return -1;
+}
+
+int
+basex_query_results(int const sfd, char const * const qid)
+{
+	char const command = '\x04';
+	struct iovec const message[] = {
+		{
+			.iov_base = (void *)&command,
+			.iov_len = sizeof command
+		},
+		{
+			.iov_base = (void *)qid,
+			.iov_len = strlen(qid) + 1
+		}
+	};
+	ssize_t rc = writev(sfd, message, sizeof message / sizeof *message);
+	if (-1 == rc) {
+		perror("writev");
+		return -1;
+	}
+	size_t len = 0;
+	for (unsigned i = 0; i < sizeof message / sizeof *message; ++i)
+		len += message[i].iov_len;
+	if (rc != len) {
+		warnx("writev: expected %lu, wrote %ld", len, rc);
+		return -1;
+	}
+	return 0;
+}
+
+/* returns result type (0 if there are no more results) */
+int
+basex_query_more(int const sfd, char * const type, char ** const block, size_t * const size, char * const code, char ** const server_message)
+{
+	char typebuf;
+	ssize_t rc = read(sfd, &typebuf, sizeof typebuf);
+	if (-1 == rc) {
+		perror("read");
+		return -1;
+	}
+	if (0 == rc) {
+		warnx("EOF");
+		return -1;
+	}
+	*type = typebuf;
+	/* 0 means end of data */
+	if ('\x00' == typebuf) {
+		rc = basex_read_server_response(sfd, code, server_message);
+		if (-1 == rc)
+			goto error;
+		return 0;
+	}
+	char *buf = NULL;
+	size_t value_size = 0;
+	value_size = basex_read_block(sfd, &buf);
+	if (-1 == value_size)
+		return -1;
+
+	*size = value_size;
+	*block = buf;
+	return value_size;
+	error:
+		if (NULL != buf)
+			free(buf);
+		return -1;
+}
+
+int
+basex_query_execute(int const sdf, char const * const qid, char ** const result, char * const code, char ** const server_message)
+{
+}
+
+int
+basex_query_close(int const sfd, char const * const qid, char * const code, char ** const server_message)
+{
+	char const command = '\x02';
+	struct iovec const message[] = {
+		{
+			.iov_base = (void *)&command,
+			.iov_len = sizeof command
+		},
+		{
+			.iov_base = (void *)qid,
+			.iov_len = strlen(qid) + 1
+		}
+	};
+	ssize_t rc = writev(sfd, message, sizeof message / sizeof *message);
+	if (-1 == rc) {
+		perror("writev");
+		return -1;
+	}
+	size_t len = 0;
+	for (unsigned i = 0; i < sizeof message / sizeof *message; ++i)
+		len += message[i].iov_len;
+	if (rc != len) {
+		warnx("writev: expected %lu, wrote %ld", len, rc);
+		return -1;
+	}
+	/* read zero byte that seems to do not mean much (doing this only for protocol synchronisation) */
+	char dummy_code;
+	rc = read(sfd, &dummy_code, sizeof dummy_code);
+	if (-1 == rc) {
+		perror("read");
+		return -1;
+	}
+	if (0 == rc) {
+		warnx("EOF");
+		return -1;
+	}
+	assert('\x00' == dummy_code);
+	return basex_read_server_response(sfd, code, server_message);
+}
+
+static ssize_t
+basex_write_block(int const sfd, char const * const block, size_t const size)
+{}
+
+int
+basex_query_bind(int const sfd, char const * const qid, char const * const name, char const * const value, char const * const type, char * const code, char ** const server_message)
+{
+	char const command = '\x03';
+	struct iovec const message[] = {
+		{
+			.iov_base = (void *)&command,
+			.iov_len = sizeof command
+		},
+		{
+			.iov_base = (void *)qid,
+			.iov_len = strlen(qid) + 1
+		},
+		{
+			.iov_base = (void *)name,
+			.iov_len = strlen(name) + 1
+		},
+		{
+			.iov_base = (void *)value,
+			.iov_len = strlen(value) + 1
+		},
+		{
+			.iov_base = (void *)type,
+			.iov_len = strlen(type) + 1
+		}
+	};
+	ssize_t rc = writev(sfd, message, sizeof message / sizeof *message);
+	if (-1 == rc) {
+		perror("writev");
+		return -1;
+	}
+	size_t len = 0;
+	for (unsigned i = 0; i < sizeof message / sizeof *message; ++i)
+		len += message[i].iov_len;
+	if (rc != len) {
+		warnx("writev: expected %lu, wrote %ld", len, rc);
+		return -1;
+	}
+	/* read zero byte that seems to do not mean much (doing this only for protocol synchronisation) */
+	/* close and context also end with this kind of server response */
+	char dummy_code;
+	rc = read(sfd, &dummy_code, sizeof dummy_code);
+	if (-1 == rc) {
+		perror("read");
+		return -1;
+	}
+	if (0 == rc) {
+		warnx("EOF");
+		return -1;
+	}
+	assert('\x00' == dummy_code);
+	return basex_read_server_response(sfd, code, server_message);
+}
+/* TODO implement binding sequences */
+
+int
+basex_query_context(int const sfd, char const * const qid, char const * const value, char const * const type, char * const code, char ** const server_message)
+{
+	char const command = '\x0e';
+	struct iovec const message[] = {
+		{
+			.iov_base = (void *)&command,
+			.iov_len = sizeof command
+		},
+		{
+			.iov_base = (void *)qid,
+			.iov_len = strlen(qid) + 1
+		},
+		{
+			.iov_base = (void *)value,
+			.iov_len = strlen(value) + 1
+		},
+		{
+			.iov_base = (void *)type,
+			.iov_len = strlen(type) +1
+		}
+	};
+	ssize_t rc = writev(sfd, message, sizeof message / sizeof *message);
+	if (-1 == rc) {
+		perror("writev");
+		return -1;
+	}
+	size_t len = 0;
+	for (unsigned i = 0; i < sizeof message / sizeof *message; ++i)
+		len += message[i].iov_len;
+	if (rc != len) {
+		warnx("writev: expected %lu, wrote %ld", len, rc);
+		return -1;
+	}
+	/* read zero byte that seems to do not mean much (doing this only for protocol synchronisation) */
+	char dummy_code;
+	rc = read(sfd, &dummy_code, sizeof dummy_code);
+	if (-1 == rc) {
+		perror("read");
+		return -1;
+	}
+	if (0 == rc) {
+		warnx("EOF");
+		return -1;
+	}
+	assert('\x00' == dummy_code);
+	return basex_read_server_response(sfd, code, server_message);
 }

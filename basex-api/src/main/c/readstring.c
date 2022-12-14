@@ -59,7 +59,7 @@ readstring(int fd, char **str)
 				size = newsize;
 			} else {
 				errno = ENOBUFS;
-				warn("variable string exceeds maximum of %d"
+				warn("variable string exceeds maximum of %lu"
 					, READSTRING_MAX);
 				goto err;
 			}
