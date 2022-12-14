@@ -34,7 +34,7 @@ readstring(int fd, char **str)
 	size_t size  = 32; // start capacity of alloc'ed string
 
 	// allocate default capacity
-	*str = calloc(size, sizeof(char));
+	*str = malloc(size);
 	if (str == NULL) {
 		warn("malloc failed.");
 		return -1;
