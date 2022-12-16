@@ -1,0 +1,7 @@
+project(basexclient)
+add_executable(basexclient example.c)
+add_library(basexdbc SHARED basexdbc.c)
+add_library(readstring readstring.c)
+add_library(md5 md5.c)
+target_link_libraries(basexdbc md5 readstring crypto)
+target_link_libraries(basexclient basexdbc)
